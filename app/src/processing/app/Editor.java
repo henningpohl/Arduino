@@ -137,7 +137,8 @@ public class Editor extends JFrame implements RunnerListener {
   static JMenu serialMenu;
 
   static AbstractMonitor serialMonitor;
-
+  static AbstractMonitor serialPlotter;
+  
   EditorHeader header;
   EditorStatus status;
   EditorConsole console;
@@ -235,7 +236,7 @@ public class Editor extends JFrame implements RunnerListener {
 
     //PdeKeywords keywords = new PdeKeywords();
     //sketchbook = new Sketchbook(this);
-
+    
     buildMenuBar();
 
     // For rev 0120, placing things inside a JPanel
@@ -766,6 +767,14 @@ public class Editor extends JFrame implements RunnerListener {
       });
     toolsMenu.add(item);
 
+    item = newJMenuItemShift(_("Serial Plotter"), 'L');
+    item.addActionListener(new ActionListener() {
+        public void actionPerformed(ActionEvent e) {
+          handlePlotter();
+        }
+    });
+    toolsMenu.add(item);
+
     addTools(toolsMenu, BaseNoGui.getToolsFolder());
     File sketchbookTools = new File(BaseNoGui.getSketchbookFolder(), "tools");
     addTools(toolsMenu, sketchbookTools);
@@ -1108,6 +1117,7 @@ public class Editor extends JFrame implements RunnerListener {
     }
     if (selection != null) selection.setState(true);
     //System.out.println(item.getLabel());
+
     BaseNoGui.selectSerialPort(name);
     if (serialMonitor != null) {
       try {
@@ -1118,6 +1128,16 @@ public class Editor extends JFrame implements RunnerListener {
       }
     }
 
+    if (serialPlotter != null) {
+      try {
+        serialPlotter.close();
+        serialPlotter.setVisible(false);
+      } catch (Exception e) {
+        // ignore
+      }
+    }
+
+    onBoardOrPortChange();
     base.onBoardOrPortChange();
 
     //System.out.println("set to " + get("serial.port"));
@@ -2523,6 +2543,9 @@ public class Editor extends JFrame implements RunnerListener {
         if (serialMonitor != null) {
           serialMonitor.suspend();
         }
+        if (serialPlotter != null) {
+          serialPlotter.suspend();
+        }
 
         uploading = true;
 
@@ -2556,6 +2579,7 @@ public class Editor extends JFrame implements RunnerListener {
       toolbar.deactivate(EditorToolbar.EXPORT);
 
       resumeOrCloseSerialMonitor();
+      resumeOrCloseSerialPlotter();
       base.onBoardOrPortChange();
     }
   }
@@ -2565,6 +2589,8 @@ public class Editor extends JFrame implements RunnerListener {
     if (serialMonitor != null) {
       BoardPort boardPort = BaseNoGui.getDiscoveryManager().find(PreferencesData.get("serial.port"));
       try {
+        if (serialMonitor != null)
+          serialMonitor.resume(boardPort);
         if (boardPort == null) {
           serialMonitor.close();
           handleSerial();
@@ -2574,7 +2600,26 @@ public class Editor extends JFrame implements RunnerListener {
       } catch (Exception e) {
         statusError(e);
       }
-    }
+   }
+  }
+
+  private void resumeOrCloseSerialPlotter() {
+    // Return the serial plotter window to its initial state
+    if (serialPlotter != null) {
+      BoardPort boardPort = BaseNoGui.getDiscoveryManager().find(PreferencesData.get("serial.port"));
+      try {
+        if (serialPlotter != null)
+          serialPlotter.resume(boardPort);
+        if (boardPort == null) {
+          serialPlotter.close();
+          handlePlotter();
+        } else {
+          serialPlotter.resume(boardPort);
+        }
+      } catch (Exception e) {
+        statusError(e);
+      }
+   }
   }
 
   // DAM: in Arduino, this is upload (with verbose output)
@@ -2584,6 +2629,9 @@ public class Editor extends JFrame implements RunnerListener {
       try {
         if (serialMonitor != null) {
           serialMonitor.suspend();
+        }
+        if (serialPlotter != null) {
+          serialPlotter.suspend();
         }
 
         uploading = true;
@@ -2618,6 +2666,8 @@ public class Editor extends JFrame implements RunnerListener {
       toolbar.deactivate(EditorToolbar.EXPORT);
 
       resumeOrCloseSerialMonitor();
+      resumeOrCloseSerialPlotter();
+
       base.onBoardOrPortChange();
     }
   }
@@ -2658,6 +2708,15 @@ public class Editor extends JFrame implements RunnerListener {
 
 
   public void handleSerial() {
+    if(serialPlotter != null) {
+      if(serialPlotter.isClosed()) {
+        serialPlotter = null;
+      } else {
+        statusError(I18n.format("Serial monitor not available while plotter is open"));
+        return;
+      }
+    }
+  
     if (serialMonitor != null) {
       // The serial monitor already exists
 
@@ -2738,7 +2797,97 @@ public class Editor extends JFrame implements RunnerListener {
     } while (serialMonitor.requiresAuthorization() && !success);
 
   }
+  
+  public void handlePlotter() {
+    if(serialMonitor != null) {
+      if(serialMonitor.isClosed()) {
+        serialMonitor = null;
+      } else {
+        statusError(I18n.format("Plotter not available while serial monitor is open"));
+        return;
+      }
+    }
+  
+    if (serialPlotter != null) {
+      // The serial plotter already exists
 
+      if (serialPlotter.isClosed()) {
+        // If it's closed, clear the refrence to the existing
+        // plotter and create a new one
+        serialPlotter = null;
+      }
+      else {
+        // If it's not closed, give it the focus
+        try {
+          serialPlotter.toFront();
+          serialPlotter.requestFocus();
+          return;
+        } catch (Exception e) {
+          // noop
+        }
+      }
+    }
+
+    BoardPort port = Base.getDiscoveryManager().find(PreferencesData.get("serial.port"));
+
+    if (port == null) {
+      statusError(I18n.format("Board at {0} is not available", PreferencesData.get("serial.port")));
+      return;
+    }
+
+    serialPlotter = new SerialPlotter(port);
+    serialPlotter.setIconImage(getIconImage());
+
+    // If currently uploading, disable the plotter (it will be later
+    // enabled when done uploading)
+    if (uploading) {
+      try {
+        serialPlotter.suspend();
+      } catch (Exception e) {
+        statusError(e);
+      }
+    }
+
+    boolean success = false;
+    do {
+      if (serialPlotter.requiresAuthorization() && !PreferencesData.has(serialPlotter.getAuthorizationKey())) {
+        PasswordAuthorizationDialog dialog = new PasswordAuthorizationDialog(this, _("Type board password to access its console"));
+        dialog.setLocationRelativeTo(this);
+        dialog.setVisible(true);
+
+        if (dialog.isCancelled()) {
+          statusNotice(_("Unable to open serial plotter"));
+          return;
+        }
+
+        PreferencesData.set(serialPlotter.getAuthorizationKey(), dialog.getPassword());
+      }
+
+      try {
+        serialPlotter.open();
+        serialPlotter.setVisible(true);
+        success = true;
+      } catch (ConnectException e) {
+        statusError(_("Unable to connect: is the sketch using the bridge?"));
+      } catch (JSchException e) {
+        statusError(_("Unable to connect: wrong password?"));
+      } catch (SerialException e) {
+        String errorMessage = e.getMessage();
+        if (e.getCause() != null && e.getCause() instanceof SerialPortException) {
+          errorMessage += " (" + ((SerialPortException) e.getCause()).getExceptionType() + ")";
+        }
+        statusError(errorMessage);
+      } catch (Exception e) {
+        statusError(e);
+      } finally {
+        if (serialPlotter.requiresAuthorization() && !success) {
+          PreferencesData.remove(serialPlotter.getAuthorizationKey());
+        }
+      }
+
+    } while (serialPlotter.requiresAuthorization() && !success);
+
+  }
 
   protected void handleBurnBootloader() {
     console.clear();
